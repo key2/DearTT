@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DearTT events</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0e0e12; color: #ddd;
+    font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    position: sticky; top: 0; display: flex; flex-wrap: wrap; gap: .6em;
+    align-items: center; padding: .55em .8em; background: #17171d;
+    border-bottom: 1px solid #2a2a33;
+  }
+  #dot { width: .65em; height: .65em; border-radius: 50%; background: #e5484d; }
+  #dot.on { background: #46d160; }
+  header .sp { flex: 1; }
+  button, label {
+    background: #22222b; color: #ccc; border: 1px solid #33333f;
+    border-radius: 4px; padding: .15em .6em; cursor: pointer; user-select: none;
+  }
+  label { display: inline-flex; align-items: center; gap: .35em; }
+  #types { display: flex; flex-wrap: wrap; gap: .35em; padding: .4em .8em;
+           background: #131318; border-bottom: 1px solid #2a2a33; }
+  #types label { font-size: 12px; padding: .05em .5em; }
+  #types label.off { opacity: .35; }
+  #log { padding: .4em .8em 2em; }
+  .ev { border-bottom: 1px solid #1d1d24; padding: .25em 0; }
+  .ev summary { cursor: pointer; list-style: none; display: flex;
+                gap: .6em; align-items: baseline; }
+  .ev summary::-webkit-details-marker { display: none; }
+  .t { color: #666; font-size: 12px; }
+  .badge { font-size: 11px; padding: 0 .45em; border-radius: 3px;
+           background: #2b2b36; color: #aab; }
+  .badge.Comment   { background: #1d3a5f; color: #9ecbff; }
+  .badge.Gift      { background: #5c4310; color: #ffd479; }
+  .badge.Like      { background: #4d1d33; color: #ff9ec4; }
+  .badge.Join      { background: #223; color: #99a; }
+  .badge.Follow, .badge.Share, .badge.Subscribe
+                   { background: #14424a; color: #7fdbe8; }
+  .badge.Connect, .badge.Hello { background: #1c4a24; color: #8ee69a; }
+  .badge.LiveEnd, .badge.Disconnect { background: #58181c; color: #ff9a9e; }
+  .who { color: #9ecbff; }
+  .ava { width: 18px; height: 18px; border-radius: 50%;
+         align-self: center; background: #2a2a33; }
+  .txt { color: #ddd; overflow-wrap: anywhere; }
+  pre { margin: .3em 0 .4em; padding: .5em .7em; background: #131318;
+        border: 1px solid #26262f; border-radius: 5px; overflow-x: auto;
+        font-size: 12px; color: #b6c2b6; max-height: 24em; }
+</style>
+</head>
+<body>
+<header>
+  <span id="dot"></span>
+  <span id="status">connecting…</span>
+  <span class="sp"></span>
+  <span id="count" class="t">0 events</span>
+  <label><input type="checkbox" id="autoscroll" checked>autoscroll</label>
+  <button id="clear">clear</button>
+</header>
+<div id="types"></div>
+<div id="log"></div>
+
+<script>
+"use strict";
+const MAX_ROWS = 1500;
+const log = document.getElementById("log");
+const dot = document.getElementById("dot");
+const statusEl = document.getElementById("status");
+const countEl = document.getElementById("count");
+const typesEl = document.getElementById("types");
+const autoscroll = document.getElementById("autoscroll");
+let total = 0;
+const hidden = new Set(["Like", "RoomUserSeq", "Unknown"]); // default off: noisy
+const seenTypes = new Set();
+
+document.getElementById("clear").onclick = () => {
+  log.textContent = ""; total = 0; countEl.textContent = "0 events";
+};
+
+function typeFilter(type) {
+  if (seenTypes.has(type)) return;
+  seenTypes.add(type);
+  const lab = document.createElement("label");
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = !hidden.has(type);
+  if (!cb.checked) lab.classList.add("off");
+  cb.onchange = () => {
+    cb.checked ? hidden.delete(type) : hidden.add(type);
+    lab.classList.toggle("off", !cb.checked);
+    for (const el of log.querySelectorAll(`[data-type="${type}"]`))
+      el.style.display = cb.checked ? "" : "none";
+  };
+  lab.append(cb, type);
+  typesEl.append(lab);
+}
+
+function summary(ev) {
+  const d = ev.data || {};
+  const who = d.user ? (d.user.nickname || "@" + d.user.unique_id) : "";
+  switch (ev.type) {
+    case "Comment":   return [who, d.comment];
+    case "Gift":      return [who, `sent ${d.gift_name || "a gift"}` +
+                              (d.repeat_count > 1 ? ` x${d.repeat_count}` : "") +
+                              (d.gift_streaking ? " (streaking…)" : "")];
+    case "Like":      return [who, `liked (total ${d.total_likes})`];
+    case "Join":      return [who, "joined"];
+    case "Follow":    return [who, "followed"];
+    case "Share":     return [who, "shared the LIVE"];
+    case "Subscribe": return [who, "subscribed"];
+    case "RoomUserSeq": return ["", `${d.viewer_count} viewers`];
+    case "Connect":   return ["", `connected to @${d.unique_id} (room ${d.room_id})`];
+    case "Hello":     return ["", "websocket connected"];
+    default:          return [who, ev.method || ""];
+  }
+}
+
+function addEvent(ev) {
+  total++;
+  countEl.textContent = total + " events";
+  typeFilter(ev.type);
+
+  const det = document.createElement("details");
+  det.className = "ev";
+  det.dataset.type = ev.type;
+  if (hidden.has(ev.type)) det.style.display = "none";
+
+  const sum = document.createElement("summary");
+  const time = document.createElement("span");
+  time.className = "t";
+  time.textContent = new Date(ev.ts_ms || Date.now())
+      .toLocaleTimeString(undefined, { hour12: false });
+  const badge = document.createElement("span");
+  badge.className = "badge " + ev.type;
+  badge.textContent = ev.type;
+  const [who, text] = summary(ev);
+  const whoEl = document.createElement("span");
+  whoEl.className = "who";
+  whoEl.textContent = who;
+  const txtEl = document.createElement("span");
+  txtEl.className = "txt";
+  txtEl.textContent = text;
+  sum.append(time, badge);
+  const avatar = ev.data && ev.data.user && ev.data.user.avatar_url;
+  if (who && avatar) {
+    const img = document.createElement("img");
+    img.className = "ava";
+    img.src = avatar;
+    img.loading = "lazy";
+    sum.append(img);
+  }
+  if (who) sum.append(whoEl);
+  sum.append(txtEl);
+  det.append(sum);
+
+  det.addEventListener("toggle", () => {          // lazy: render JSON on open
+    if (det.open && !det.querySelector("pre")) {
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(ev, null, 2);
+      det.append(pre);
+    }
+  });
+
+  log.append(det);
+  while (log.childElementCount > MAX_ROWS) log.firstElementChild.remove();
+  if (autoscroll.checked) window.scrollTo(0, document.body.scrollHeight);
+}
+
+let retry = 0;
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    retry = 0;
+    dot.classList.add("on");
+    statusEl.textContent = `ws://${location.host}/ws`;
+  };
+  ws.onmessage = (m) => {
+    try { addEvent(JSON.parse(m.data)); } catch (e) { console.error(e, m.data); }
+  };
+  ws.onclose = () => {
+    dot.classList.remove("on");
+    const delay = Math.min(1000 * 2 ** retry++, 15000);
+    statusEl.textContent = `disconnected — retrying in ${delay / 1000}s`;
+    setTimeout(connect, delay);
+  };
+  ws.onerror = () => ws.close();
+}
+connect();
+</script>
+</body>
+</html>

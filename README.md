@@ -1,0 +1,155 @@
+# DearTT
+
+A cross-platform (Linux / Windows) **TikTok LIVE viewer** built with Dear
+ImGui: live video playback next to real-time chat, gifts, likes and joins,
+with a stats panel (viewers, diamonds/min, per-gift breakdown, top gifters)
+and an embedded web server that streams every event as JSON.
+
+```
++-------------------------------+------------------+
+|                               |  chat / gifts    |
+|     live video (FFmpeg)       |  (ttlive-cpp)    |
+|                               +------------------+
+|                               |  stats / plots   |
++-------------------------------+------------------+
+```
+
+- **Video**: FLV/HLS pull via FFmpeg (H.264/HEVC + AAC), audio through miniaudio.
+- **Events**: [ttlive-cpp](https://github.com/key2/ttlive-cpp) — signed
+  Webcast API + WebSocket push with a Chrome TLS fingerprint (curl-impersonate).
+- **Gift accounting**: streakable gift combos are counted exactly once, when
+  the combo finishes; non-streakable gifts (which never send a "combo end")
+  are counted immediately.
+- **Webview**: `http://localhost:8080/` serves a minimal event viewer;
+  `ws://localhost:8080/ws` broadcasts 100% of events as JSON (including the
+  raw decoded protobuf of every Webcast message).
+- **Fonts**: bundled pan-Unicode
+  [GoNotoKurrent](https://github.com/satbyy/go-noto-universal) (SIL OFL) +
+  Twemoji color emoji — chat renders in any script out of the box.
+
+## Getting the source
+
+```sh
+git clone --recurse-submodules https://github.com/key2/DearTT.git
+cd DearTT
+# If cloned without --recurse-submodules:
+git submodule update --init --recursive
+```
+
+## Building — Linux
+
+Build dependencies (Ubuntu/Debian package names):
+
+```sh
+sudo apt install build-essential cmake git pkg-config \
+    libavformat-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev \
+    libprotobuf-dev protobuf-compiler libssl-dev zlib1g-dev libfreetype-dev \
+    xorg-dev
+```
+
+(`xorg-dev` provides the X11 headers GLFW needs; GLFW, Dear ImGui, ImPlot,
+civetweb, miniaudio and nlohmann-json are vendored and built from source.
+The first configure downloads a prebuilt curl-impersonate.)
+
+```sh
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/deartt [@username]
+```
+
+Package a release zip (stripped binary + js/web/fonts assets + build-info):
+
+```sh
+./scripts/package-linux.sh        # -> dist-linux64/ and dist-linux64.zip
+```
+
+The Linux package links distro libraries at runtime; the target machine
+needs the runtime equivalents (Ubuntu: `libavformat61 libavcodec61
+libswscale8 libswresample5 libprotobuf32 libfreetype6` — i.e. a distro with
+FFmpeg 7 era libraries) plus OpenGL drivers.
+
+## Building — Windows (cross-compiled from Linux)
+
+The Windows build is produced on Linux with MinGW-w64:
+
+```sh
+sudo apt install mingw-w64 nasm zip
+```
+
+1. **Cross-build the dependencies** (one-time; cached in `win64-deps/`):
+
+   ```sh
+   ./scripts/build-win64-deps.sh
+   ```
+
+   This produces a **minimal FFmpeg 7.1** (LGPL, ~5.5 MB of DLLs instead of
+   the ~140 MB full builds: only FLV/HLS/MPEG-TS/fMP4 demuxers,
+   H.264/HEVC/AAC/MP3 decoders, webp/jpeg/png/gif image decoding for
+   gift icons, and https via Windows schannel), a curl-impersonate DLL
+   import lib, and static OpenSSL + protobuf. Downloads are cached in
+   `win64-deps/dl/`.
+
+2. **Build the app**:
+
+   ```sh
+   cmake -B build-win64 -S . -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw64.cmake
+   cmake --build build-win64 -j
+   ```
+
+3. **Package** (strips every binary, verifies all DLL imports are shipped,
+   writes `build-info.txt` with per-file sha256, zips):
+
+   ```sh
+   ./scripts/package-win64.sh       # -> dist-win64/ and dist-win64.zip
+   ```
+
+The result is self-contained: unzip anywhere on a Windows x86_64 machine and
+run `deartt.exe`. If a "DLL not found" error ever appears, compare
+`build-info.txt` in the extracted folder with the one in the zip — it means
+an old extracted copy is being launched.
+
+## Running
+
+```sh
+./build/deartt              # enter a @username in the UI
+./build/deartt @someuser    # connect immediately
+```
+
+| Environment variable | Effect |
+|---|---|
+| `DEARTT_PORT` | Webview/WebSocket port (default 8080) |
+| `DEARTT_COOKIES` | Cookies for the TikTok session, e.g. `sessionid=...` — needed for age/region-restricted rooms |
+| `GLFW_PLATFORM` | `x11` or `wayland` to force the Linux backend |
+
+The webview at `http://localhost:8080/` shows every event live; the
+`/ws` WebSocket delivers them as JSON (type, user, gift fields incl.
+`gift_type`/`gift_streaking`, plus the fully decoded raw protobuf message)
+for external tooling.
+
+## Project layout
+
+```
+src/
+  main.cpp            UI: layout, fonts, stats panel, plots
+  live_session.cpp    ttlive client thread -> chat feed + event sink
+  stats.cpp           StatsCollector: totals, rates, per-gift/per-gifter
+  video_player.cpp    FFmpeg pull + decode -> RGBA frames + audio
+  audio_output.cpp    miniaudio playback
+  event_server.cpp    civetweb HTTP + WebSocket server (:8080)
+  event_json.cpp      Event -> JSON (incl. reflective protobuf decode)
+  icon_cache.cpp      Gift icon / avatar fetch + decode + GL textures
+web/index.html        The event-viewer website
+fonts/                GoNotoKurrent (OFL) + Twemoji (CC-BY)
+imgui/, third_party/  Vendored: imgui, implot, glfw, freetype, civetweb,
+                      miniaudio, nlohmann-json
+ttlive-cpp/           TikTok LIVE client library (submodule)
+cmake/                MinGW-w64 toolchain file
+scripts/              Windows dep builder + Linux/Windows packagers
+```
+
+## Notes
+
+- ImGui has no text shaping/bidi: Arabic renders as unjoined letterforms in
+  logical order (the webview shapes it correctly in the browser).
+- This project is for interoperability/research. Respect TikTok's Terms of
+  Service and applicable laws.

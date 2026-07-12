@@ -1,0 +1,21 @@
+[submodule "imgui"]
+	path = imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "third_party/glfw"]
+	path = third_party/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "third_party/implot"]
+	path = third_party/implot
+	url = https://github.com/epezent/implot
+[submodule "third_party/civetweb"]
+	path = third_party/civetweb
+	url = https://github.com/civetweb/civetweb
+[submodule "third_party/freetype"]
+	path = third_party/freetype
+	url = https://github.com/freetype/freetype
+[submodule "third_party/miniaudio"]
+	path = third_party/miniaudio
+	url = https://github.com/mackron/miniaudio.git
+[submodule "ttlive-cpp"]
+	path = ttlive-cpp
+	url = https://github.com/key2/ttlive-cpp.git

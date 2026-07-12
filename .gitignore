@@ -1,0 +1,14 @@
+# Build trees
+build/
+build-*/
+
+# Packaged distributions
+dist-*/
+dist-*.zip
+
+# Cross-build dependency cache (recreated by scripts/build-win64-deps.sh)
+win64-deps/
+
+# Runtime state
+imgui.ini
+*.log
