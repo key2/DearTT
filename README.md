@@ -1,6 +1,6 @@
 # DearTT
 
-A cross-platform (Linux / Windows) **TikTok LIVE viewer** built with Dear
+A cross-platform (Linux / Windows / macOS) **TikTok LIVE viewer** built with Dear
 ImGui: live video playback next to real-time chat, gifts, likes and joins,
 with a stats panel (viewers, diamonds/min, per-gift breakdown, top gifters)
 and an embedded web server that streams every event as JSON.
@@ -67,6 +67,37 @@ The Linux package links distro libraries at runtime; the target machine
 needs the runtime equivalents (Ubuntu: `libavformat61 libavcodec61
 libswscale8 libswresample5 libprotobuf32 libfreetype6` — i.e. a distro with
 FFmpeg 7 era libraries) plus OpenGL drivers.
+
+## Building — macOS
+
+Native build (Apple Silicon or Intel) using Homebrew for the system libraries.
+GLFW, Dear ImGui, ImPlot, civetweb, miniaudio and nlohmann-json are vendored
+and built from source; the first configure downloads a prebuilt
+curl-impersonate for the host arch.
+
+```sh
+brew install cmake pkg-config ffmpeg protobuf freetype openssl@3
+```
+
+(`ffmpeg` provides avformat/avcodec/swscale/swresample/avutil; `protobuf`
+pulls in abseil; `freetype` pulls in libpng for color-emoji bitmaps.)
+
+```sh
+cmake -B build-macos -S . -DCMAKE_BUILD_TYPE=Release
+cmake --build build-macos -j
+./build-macos/deartt [@username]
+```
+
+Package a release zip (stripped binary + js/web/fonts assets + build-info):
+
+```sh
+./scripts/package-macos.sh        # -> dist-macos/ and dist-macos.zip
+```
+
+Like the Linux package, the macOS package links Homebrew libraries at runtime;
+the target machine needs the same formulae installed (`brew install ffmpeg
+protobuf freetype openssl@3`). The packaged binary matches the build
+architecture (arm64 on Apple Silicon, x86_64 on Intel).
 
 ## Building — Windows (cross-compiled from Linux)
 
@@ -144,7 +175,7 @@ imgui/, third_party/  Vendored: imgui, implot, glfw, freetype, civetweb,
                       miniaudio, nlohmann-json
 ttlive-cpp/           TikTok LIVE client library (submodule)
 cmake/                MinGW-w64 toolchain file
-scripts/              Windows dep builder + Linux/Windows packagers
+scripts/              Windows dep builder + Linux/Windows/macOS packagers
 ```
 
 ## Notes

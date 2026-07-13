@@ -33,7 +33,19 @@
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
 
+// Silencing libprotobuf's console spam differs across major versions:
+//   - protobuf <= 4.x (22.x): google::protobuf::SetLogHandler() in
+//     <google/protobuf/stubs/logging.h>.
+//   - protobuf >= 5.x (23+, incl. Homebrew's current build): logging moved to
+//     Abseil; the stubs header is gone and severity is controlled globally via
+//     absl::SetMinLogLevel / SetStderrThreshold.
+#include <google/protobuf/stubs/common.h>
+#if defined(GOOGLE_PROTOBUF_VERSION) && GOOGLE_PROTOBUF_VERSION < 4023000
 #include <google/protobuf/stubs/logging.h>
+#define DEARTT_PROTOBUF_HAS_SETLOGHANDLER 1
+#else
+#include <absl/log/globals.h>
+#endif
 
 #include "event_json.hpp"
 #include "event_server.hpp"
@@ -495,7 +507,14 @@ int main(int argc, char** argv) {
     // fields are mislabeled string-vs-bytes, which makes libprotobuf spam
     // "invalid UTF-8" errors to the console — drop its logging entirely
     // (failed parses already fall back to raw_base64 gracefully).
+#if defined(DEARTT_PROTOBUF_HAS_SETLOGHANDLER)
     google::protobuf::SetLogHandler(nullptr);
+#else
+    // protobuf 5.x+: raise the Abseil log threshold above every level protobuf
+    // emits so its "invalid UTF-8" warnings never reach stderr.
+    absl::SetMinLogLevel(absl::LogSeverityAtLeast::kInfinity);
+    absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfinity);
+#endif
 
     glfwSetErrorCallback(glfwErrorCb);
 #if defined(GLFW_PLATFORM) && !defined(_WIN32) && !defined(__APPLE__)
