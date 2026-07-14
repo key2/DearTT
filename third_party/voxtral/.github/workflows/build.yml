@@ -1,0 +1,47 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# ggml is built from source via FetchContent (see CMakeLists), so no system ggml
+# is required on any platform. Static build => self-contained binary artifacts.
+jobs:
+  build:
+    name: build on ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+          - os: macos-latest
+            arch: arm64
+          - os: windows-latest
+            arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voxtral-${{ runner.os }}-${{ matrix.arch }}
+          path: |
+            build/voxtral
+            build/voxtral.exe
+            build/voxtral-quantize
+            build/voxtral-quantize.exe
+            build/Release/voxtral.exe
+            build/Release/voxtral-quantize.exe
+          if-no-files-found: ignore

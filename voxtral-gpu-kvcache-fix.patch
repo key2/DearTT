@@ -1,0 +1,68 @@
+diff --git a/src/voxtral.cpp b/src/voxtral.cpp
+index f8260ca..d2ccdce 100644
+--- a/src/voxtral.cpp
++++ b/src/voxtral.cpp
+@@ -1223,14 +1223,12 @@ static void clear_kv_cache(voxtral_context * ctx) {
+     if (!ctx || !ctx->kv_self_k || !ctx->kv_self_v) {
+         return;
+     }
+-    void * k_data = ggml_get_data(ctx->kv_self_k);
+-    void * v_data = ggml_get_data(ctx->kv_self_v);
+-    if (k_data) {
+-        memset(k_data, 0, ggml_nbytes(ctx->kv_self_k));
+-    }
+-    if (v_data) {
+-        memset(v_data, 0, ggml_nbytes(ctx->kv_self_v));
+-    }
++    // The KV cache tensors live in the compute backend's buffer, which may be
++    // device (GPU) memory. Use the backend-aware memset instead of a raw CPU
++    // memset on ggml_get_data(), which is only valid for host buffers and
++    // segfaults on Vulkan/CUDA.
++    ggml_backend_tensor_memset(ctx->kv_self_k, 0, 0, ggml_nbytes(ctx->kv_self_k));
++    ggml_backend_tensor_memset(ctx->kv_self_v, 0, 0, ggml_nbytes(ctx->kv_self_v));
+     ctx->kv_used = 0;
+ }
+ 
+@@ -1244,24 +1242,28 @@ static void kv_cache_shift_left(voxtral_context * ctx, int32_t shift) {
+         return;
+     }
+ 
+-    uint8_t * k_data = (uint8_t *) ggml_get_data(ctx->kv_self_k);
+-    uint8_t * v_data = (uint8_t *) ggml_get_data(ctx->kv_self_v);
+-    if (!k_data || !v_data) {
+-        return;
+-    }
+-
+     const size_t row_bytes = ctx->kv_self_k->nb[1];
+     const size_t layer_stride = ctx->kv_self_k->nb[2];
++    const size_t keep_bytes = (size_t) (window - shift) * row_bytes;
+ 
++    // The KV cache may live in device (GPU) memory, so we cannot memmove/memset
++    // it directly. Stage the retained rows of each layer through a host buffer
++    // and write them back with the backend-aware copy API. The freed tail is
++    // zeroed with ggml_backend_tensor_memset.
++    std::vector<uint8_t> stage(keep_bytes);
+     for (int32_t l = 0; l < ctx->model->hp.dec_layers; ++l) {
+-        uint8_t * k_base = k_data + (size_t) l * layer_stride;
+-        uint8_t * v_base = v_data + (size_t) l * layer_stride;
+-
+-        memmove(k_base, k_base + (size_t) shift * row_bytes, (size_t) (window - shift) * row_bytes);
+-        memmove(v_base, v_base + (size_t) shift * row_bytes, (size_t) (window - shift) * row_bytes);
+-
+-        memset(k_base + (size_t) (window - shift) * row_bytes, 0, (size_t) shift * row_bytes);
+-        memset(v_base + (size_t) (window - shift) * row_bytes, 0, (size_t) shift * row_bytes);
++        const size_t layer_off = (size_t) l * layer_stride;
++        const size_t src_off   = (size_t) shift * row_bytes;
++
++        // K: shift retained rows to the front.
++        ggml_backend_tensor_get(ctx->kv_self_k, stage.data(), layer_off + src_off, keep_bytes);
++        ggml_backend_tensor_set(ctx->kv_self_k, stage.data(), layer_off, keep_bytes);
++        ggml_backend_tensor_memset(ctx->kv_self_k, 0, layer_off + keep_bytes, (size_t) shift * row_bytes);
++
++        // V: same shift.
++        ggml_backend_tensor_get(ctx->kv_self_v, stage.data(), layer_off + src_off, keep_bytes);
++        ggml_backend_tensor_set(ctx->kv_self_v, stage.data(), layer_off, keep_bytes);
++        ggml_backend_tensor_memset(ctx->kv_self_v, 0, layer_off + keep_bytes, (size_t) shift * row_bytes);
+     }
+ }
+ 

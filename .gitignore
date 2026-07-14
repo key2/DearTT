@@ -18,3 +18,8 @@ imgui.ini
 # runtime; the packagers ship an empty profiles/ folder.
 gallery/
 profiles/
+
+# Voxtral speech-to-text GGUF weights (~2.7 GB) — too large for git; fetch
+# with third_party/voxtral/tools/download_model.sh into models/voxtral/.
+models/voxtral/
+*.gguf

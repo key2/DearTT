@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -43,6 +44,13 @@ public:
     /// display the frame at (w * sar) x h — anamorphic streams have sar != 1.
     bool takeFrame(std::vector<uint8_t>& rgba, int& w, int& h, float& sar);
 
+    /// Tap on the decoded audio (f32 interleaved, native rate/channels),
+    /// called from the decode thread. Used to feed speech-to-text. Set once
+    /// before open(); must be thread-safe / cheap.
+    using AudioTap = std::function<void(const float* interleaved, int frames,
+                                        int channels, int sampleRate)>;
+    void setAudioTap(AudioTap cb) { audioTap_ = std::move(cb); }
+
     /// Source dimensions (0 until the first frame is decoded).
     int width() const { return width_.load(); }
     int height() const { return height_.load(); }
@@ -62,6 +70,7 @@ private:
     void setError(const std::string& msg);
 
     std::thread thread_;
+    AudioTap audioTap_;   // immutable while the decode thread runs
     std::atomic<bool> quit_{false};
     AudioOutput audio_;
     std::atomic<State> state_{State::Idle};

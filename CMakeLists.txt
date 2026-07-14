@@ -197,6 +197,24 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Voxtral speech-to-text (optional). Pulls ggml via FetchContent and builds
+# from source, so it's Linux/macOS only here (the MinGW Windows cross-build
+# doesn't set up a ggml toolchain). Enable a GPU backend with e.g.
+# -DGGML_VULKAN=ON at configure time to run on the GPU.
+# ---------------------------------------------------------------------------
+option(DEARTT_STT "Build speech-to-text via voxtral.cpp" ON)
+if(WIN32)
+  set(DEARTT_STT OFF)
+endif()
+if(DEARTT_STT)
+  set(VOXTRAL_NATIVE_OPT OFF CACHE BOOL "" FORCE)  # avoid -march=native ABI risk
+  add_subdirectory(third_party/voxtral)
+  message(STATUS "Speech-to-text: ON (voxtral.cpp + ggml)")
+else()
+  message(STATUS "Speech-to-text: OFF")
+endif()
+
+# ---------------------------------------------------------------------------
 # OpenGL
 # ---------------------------------------------------------------------------
 find_package(OpenGL REQUIRED)
@@ -254,6 +272,13 @@ if(DEARTT_FACE)
   # starts even if the DLL can't initialize (missing AVX2, old Windows, etc.).
   # We still link the import lib for symbol resolution, but the actual loading
   # is deferred by the face_tracker which catches init failures gracefully.
+endif()
+
+# Speech-to-text (conditional on voxtral being built).
+if(DEARTT_STT)
+  target_sources(deartt PRIVATE src/stt.cpp)
+  target_link_libraries(deartt PRIVATE voxtral_lib)
+  target_compile_definitions(deartt PRIVATE DEARTT_STT)
 endif()
 
 if(WIN32)

@@ -61,6 +61,10 @@
 #include "face_tracker.hpp"
 #endif
 
+#ifdef DEARTT_STT
+#include "stt.hpp"
+#endif
+
 namespace {
 
 void glfwErrorCb(int code, const char* desc) {
@@ -638,6 +642,37 @@ int main(int argc, char** argv) {
     }
 #endif
 
+#ifdef DEARTT_STT
+    SttEngine stt;
+    bool sttEnabled = false;
+    bool sttAvailable = false;
+    {
+        // Resolve the Voxtral GGUF: $DEARTT_VOXTRAL_MODEL, else the first
+        // .gguf under models/voxtral/.
+        std::string modelPath;
+        if (const char* m = std::getenv("DEARTT_VOXTRAL_MODEL")) modelPath = m;
+        if (modelPath.empty()) {
+            std::string dir = findResource("models/voxtral");
+            std::error_code ec;
+            if (!dir.empty())
+                for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+                    if (e.path().extension() == ".gguf") {
+                        modelPath = e.path().string();
+                        break;
+                    }
+        }
+        if (!modelPath.empty()) {
+            sttAvailable = true;
+            stt.start(modelPath);
+            // Feed the decoded audio to STT (resampled to 16 kHz mono inside).
+            player.setAudioTap([&stt](const float* pcm, int frames, int ch,
+                                      int rate) {
+                stt.pushAudio(pcm, frames, ch, rate);
+            });
+        }
+    }
+#endif
+
     session.setEventSink(
         [&eventServer, &stats, &avatars](const ttlive::Event& e) {
             stats.record(e);
@@ -996,6 +1031,19 @@ int main(int argc, char** argv) {
         }
         ImGui::SameLine();
         ImGui::Checkbox("stats", &showStats);
+#ifdef DEARTT_STT
+        ImGui::SameLine();
+        if (!sttAvailable) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("STT", &sttEnabled)) stt.setEnabled(sttEnabled);
+        if (!sttAvailable) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                sttAvailable
+                    ? "Speech-to-text (Voxtral): transcribe the stream audio\n"
+                      "into the panel next to the video."
+                    : "No Voxtral model found (models/voxtral/*.gguf or\n"
+                      "$DEARTT_VOXTRAL_MODEL).");
+#endif
 #ifdef DEARTT_FACE_RECOGNITION
         if (faceTracker.running()) {
             // Identity smoothing window (temporal vote + coast duration).
@@ -1013,15 +1061,20 @@ int main(int argc, char** argv) {
 #endif
         ImGui::Separator();
 
-        // Split: video (left, stretch) | gifts | stats | chat (fixed panes;
-        // chat only in "right" mode — "overlay" draws it on top of the video).
+        // Split: video (left, stretch) | STT | gifts | stats | chat (fixed
+        // panes; chat only in "right" mode — "overlay" draws over the video).
         const float chatWidth = chatMode == kChatRight ? 340.0f : 0.0f;
         const float giftsWidth = showStats ? 300.0f : 0.0f;
         const float statsWidth = showStats ? 330.0f : 0.0f;
-        int sidePanes = (showStats ? 2 : 0) + (chatMode == kChatRight ? 1 : 0);
+        float sttWidth = 0.0f;
+#ifdef DEARTT_STT
+        if (sttEnabled) sttWidth = 320.0f;
+#endif
+        int sidePanes = (showStats ? 2 : 0) + (chatMode == kChatRight ? 1 : 0) +
+                        (sttWidth > 0 ? 1 : 0);
         ImVec2 avail = ImGui::GetContentRegionAvail();
         float videoWidth = avail.x - chatWidth - giftsWidth - statsWidth -
-                           8.0f * (float)sidePanes;
+                           sttWidth - 8.0f * (float)sidePanes;
 
         ImGui::BeginChild("video", ImVec2(videoWidth, 0),
                           ImGuiChildFlags_None,
@@ -1260,6 +1313,34 @@ int main(int argc, char** argv) {
         }
         ImGui::EndChild();
 
+#ifdef DEARTT_STT
+        // Speech-to-text column, right next to the video.
+        if (sttWidth > 0) {
+            ImGui::SameLine();
+            ImGui::BeginChild("sttpane", ImVec2(sttWidth, 0),
+                              ImGuiChildFlags_Borders);
+            ImGui::TextUnformatted("Speech-to-text");
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 44);
+            if (ImGui::SmallButton("clear")) stt.clearTranscript();
+            ImGui::TextDisabled("%s", stt.status().c_str());
+            ImGui::Separator();
+            ImGui::BeginChild("sttlog", ImVec2(0, 0), ImGuiChildFlags_None);
+            std::string tr = stt.transcript();
+            if (tr.empty())
+                ImGui::TextDisabled(stt.ready() ? "listening..."
+                                                : "loading model...");
+            else {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(tr.c_str());
+                ImGui::PopTextWrapPos();
+                if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+                    ImGui::SetScrollHereY(1.0f);  // autoscroll when at bottom
+            }
+            ImGui::EndChild();
+            ImGui::EndChild();
+        }
+#endif
+
         if (showStats) {
             ImGui::SameLine();
             ImGui::BeginChild("giftspane", ImVec2(giftsWidth, 0),
@@ -1450,7 +1531,10 @@ int main(int argc, char** argv) {
     avatarTex.shutdown();
 #endif
     session.stop();
-    player.close();
+    player.close();   // joins the decode thread -> no more audio-tap calls
+#ifdef DEARTT_STT
+    stt.stop();
+#endif
     videoTex.destroy();
     giftIcons.shutdown();
     avatars.shutdown();

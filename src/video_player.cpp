@@ -223,6 +223,9 @@ void VideoPlayer::threadMain(std::string url) {
                                     afrm->nb_samples);
                 if (n > 0 && audio_.running())
                     audio_.write(pcm.data(), (size_t)n);
+                // Tap for speech-to-text (native rate, f32 interleaved).
+                if (n > 0 && audioTap_)
+                    audioTap_(pcm.data(), n, outChannels, afrm->sample_rate);
                 av_frame_unref(afrm);
             }
             continue;
