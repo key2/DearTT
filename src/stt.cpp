@@ -2,6 +2,10 @@
 
 #include <chrono>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
@@ -11,6 +15,19 @@ extern "C" {
 #include "voxtral.h"
 
 namespace {
+
+// Wine's winevulkan doesn't implement every extension ggml's Vulkan backend
+// asks for, and ggml aborts (not throws) on some of those paths — uncatchable.
+// Detect Wine and keep STT on the CPU there.
+bool runningUnderWine() {
+#ifdef _WIN32
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+#else
+    return false;
+#endif
+}
+
 constexpr int kSttRate = VOXTRAL_SAMPLE_RATE;   // 16000
 // Short windows = low latency. Each window is decoded token-by-token and
 // streamed to the UI as it arrives (near real-time), then committed.
@@ -100,16 +117,44 @@ void SttEngine::pushAudio(const float* interleaved, int frames, int channels,
 }
 
 void SttEngine::workerMain(std::string modelPath) {
-    voxtral_model* model = voxtral_model_load_from_file(
-        modelPath, nullptr, voxtral_gpu_backend::auto_detect);
+    // GPU init can throw from inside ggml (e.g. a Vulkan driver advertises a
+    // device but createDevice fails with a missing extension — seen under
+    // Wine's winevulkan). An uncaught exception here would std::terminate the
+    // whole app, so catch it and retry CPU-only.
+    voxtral_model* model = nullptr;
+    voxtral_context* ctx = nullptr;
+    std::vector<voxtral_gpu_backend> attempts = {voxtral_gpu_backend::auto_detect,
+                                                 voxtral_gpu_backend::none};
+    if (runningUnderWine()) {
+        std::fprintf(stderr, "[stt] Wine detected: CPU backend only\n");
+        attempts = {voxtral_gpu_backend::none};
+    }
+    for (voxtral_gpu_backend gpu : attempts) {
+        try {
+            model = voxtral_model_load_from_file(modelPath, nullptr, gpu);
+            if (!model) break;  // file problem: a retry won't help
+            voxtral_context_params params;
+            params.gpu = gpu;
+            ctx = voxtral_init_from_model(model, params);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                         "[stt] backend init failed (%s)%s\n", e.what(),
+                         gpu == voxtral_gpu_backend::auto_detect
+                             ? ", retrying CPU-only"
+                             : "");
+            ctx = nullptr;
+        }
+        if (ctx) break;
+        if (model) {
+            voxtral_model_free(model);
+            model = nullptr;
+        }
+    }
     if (!model) {
         std::lock_guard<std::mutex> lk(textMutex_);
         status_ = "failed to load model: " + modelPath;
         return;
     }
-    voxtral_context_params params;
-    params.gpu = voxtral_gpu_backend::auto_detect;
-    voxtral_context* ctx = voxtral_init_from_model(model, params);
     if (!ctx) {
         voxtral_model_free(model);
         std::lock_guard<std::mutex> lk(textMutex_);
