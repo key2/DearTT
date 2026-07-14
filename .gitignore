@@ -12,3 +12,9 @@ win64-deps/
 # Runtime state
 imgui.ini
 *.log
+
+# Per-user runtime data — NEVER commit: these hold real people's face
+# embeddings (biometric data) and the operator's stream targets. Created at
+# runtime; the packagers ship an empty profiles/ folder.
+gallery/
+profiles/

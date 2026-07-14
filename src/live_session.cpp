@@ -221,6 +221,20 @@ void LiveSession::threadMain(std::string username) {
         ttlive::ClientOptions opts;
         opts.js_dir = findJsDir();
         opts.fetch_gift_list = true;  // names/prices/icons for the stats panel
+        // Dual transport: run the WebSocket (low latency, auto-reconnect on
+        // drop) AND HTTP long-polling concurrently. Messages are de-duplicated
+        // by server msg_id, so counts stay accurate even if the socket drops
+        // or one transport misses a message. Override with
+        // DEARTT_TRANSPORT=ws|poll|dual (default dual).
+        opts.use_websocket = true;
+        opts.use_polling = true;
+        if (const char* tr = std::getenv("DEARTT_TRANSPORT")) {
+            std::string t = tr;
+            opts.use_websocket = (t == "ws" || t == "dual");
+            opts.use_polling = (t == "poll" || t == "dual");
+            if (!opts.use_websocket && !opts.use_polling)
+                opts.use_websocket = true;  // never disable both
+        }
         // Age-restricted LIVEs only hand out stream URLs to logged-in
         // sessions (room/info status_code 4003110 otherwise). Users can pass
         // their browser session, e.g. DEARTT_COOKIES="sessionid=...".
@@ -231,7 +245,9 @@ void LiveSession::threadMain(std::string username) {
             std::lock_guard<std::mutex> lk(mutex_);
             client_ = &client;
         }
-        client.run();  // blocks until LiveEnd / disconnect()
+        // Blocks until the LIVE genuinely ends or disconnect() is called;
+        // transient WebSocket drops are auto-reconnected inside run().
+        client.run();
         {
             std::lock_guard<std::mutex> lk(mutex_);
             client_ = nullptr;

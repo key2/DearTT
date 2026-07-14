@@ -164,6 +164,39 @@ if(NOT TARGET protobuf::libprotobuf)
 endif()
 
 # ---------------------------------------------------------------------------
+# ONNX Runtime — face detection & recognition (optional; opt-in).
+# On Linux, system package libonnxruntime-dev works; on Windows pass
+# -DONNXRUNTIME_DIR=<prebuilt root with include/ + lib/>.
+# ---------------------------------------------------------------------------
+set(ONNXRUNTIME_DIR "" CACHE PATH "Prebuilt ONNX Runtime (include/ + lib/)")
+set(DEARTT_FACE OFF)
+
+if(ONNXRUNTIME_DIR)
+  find_path(ORT_INCLUDE onnxruntime_cxx_api.h
+            HINTS ${ONNXRUNTIME_DIR}/include PATH_SUFFIXES onnxruntime)
+  find_library(ORT_LIB onnxruntime HINTS ${ONNXRUNTIME_DIR}/lib)
+  if(ORT_INCLUDE AND ORT_LIB)
+    set(DEARTT_FACE ON)
+  endif()
+else()
+  # Try system headers (e.g. /usr/include/onnxruntime on Ubuntu)
+  find_path(ORT_INCLUDE onnxruntime_cxx_api.h PATH_SUFFIXES onnxruntime)
+  find_library(ORT_LIB onnxruntime)
+  if(ORT_INCLUDE AND ORT_LIB)
+    set(DEARTT_FACE ON)
+  endif()
+endif()
+
+if(DEARTT_FACE)
+  add_library(onnxruntime INTERFACE)
+  target_include_directories(onnxruntime INTERFACE ${ORT_INCLUDE})
+  target_link_libraries(onnxruntime INTERFACE ${ORT_LIB})
+  message(STATUS "Face recognition: ON (${ORT_LIB})")
+else()
+  message(STATUS "Face recognition: OFF (ONNX Runtime not found)")
+endif()
+
+# ---------------------------------------------------------------------------
 # OpenGL
 # ---------------------------------------------------------------------------
 find_package(OpenGL REQUIRED)
@@ -180,6 +213,7 @@ add_executable(deartt
   src/event_json.cpp
   src/stats.cpp
   src/icon_cache.cpp
+  src/profile.cpp
 )
 target_include_directories(deartt PRIVATE src
   # ttlive internals: http_client.hpp for gift-icon downloads (vendored lib,
@@ -204,6 +238,23 @@ target_link_libraries(deartt PRIVATE
 target_compile_definitions(deartt PRIVATE
   DEARTT_WEB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/web"
   DEARTT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+# Face recognition (conditional on ONNX Runtime being found).
+if(DEARTT_FACE)
+  target_sources(deartt PRIVATE
+    src/face_detector.cpp
+    src/face_embedder.cpp
+    src/face_gallery.cpp
+    src/face_tracker.cpp
+    src/avatar_fetch.cpp
+  )
+  target_link_libraries(deartt PRIVATE onnxruntime)
+  target_compile_definitions(deartt PRIVATE DEARTT_FACE_RECOGNITION)
+  # On Windows, onnxruntime.dll is loaded at runtime (LoadLibrary) so the app
+  # starts even if the DLL can't initialize (missing AVX2, old Windows, etc.).
+  # We still link the import lib for symbol resolution, but the actual loading
+  # is deferred by the face_tracker which catches init failures gracefully.
+endif()
 
 if(WIN32)
   target_compile_definitions(deartt PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

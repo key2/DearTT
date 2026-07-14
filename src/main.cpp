@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -51,8 +52,14 @@
 #include "event_server.hpp"
 #include "icon_cache.hpp"
 #include "live_session.hpp"
+#include "profile.hpp"
 #include "stats.hpp"
 #include "video_player.hpp"
+
+#ifdef DEARTT_FACE_RECOGNITION
+#include "avatar_fetch.hpp"
+#include "face_tracker.hpp"
+#endif
 
 namespace {
 
@@ -499,6 +506,52 @@ const char* stateText(LiveSession::State s) {
     return "?";
 }
 
+#ifdef DEARTT_FACE_RECOGNITION
+// Files dropped onto the window (GLFW drop callback, main thread during
+// glfwPollEvents); consumed by the avatar picture picker when open.
+std::vector<std::string> g_droppedFiles;
+void dropCb(GLFWwindow*, int count, const char** paths) {
+    for (int i = 0; i < count; i++) g_droppedFiles.emplace_back(paths[i]);
+}
+
+// Small GL-texture cache for display-only profile pictures, keyed by person.
+struct AvatarTextures {
+    struct Entry { std::string path; unsigned tex = 0; };
+    std::map<std::string, Entry> map_;
+
+    unsigned get(const std::string& person, const std::string& path) {
+        if (path.empty()) return 0;
+        auto it = map_.find(person);
+        if (it != map_.end() && it->second.path == path) return it->second.tex;
+        std::vector<uint8_t> rgba;
+        int w = 0, h = 0;
+        if (!decodeImageFileRGBA(path, rgba, w, h, 96)) return 0;
+        unsigned tex = (it != map_.end()) ? it->second.tex : 0u;
+        if (!tex) glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba.data());
+        map_[person] = {path, tex};
+        return tex;
+    }
+    void invalidate(const std::string& person) {
+        auto it = map_.find(person);
+        if (it != map_.end()) {
+            if (it->second.tex) glDeleteTextures(1, &it->second.tex);
+            map_.erase(it);
+        }
+    }
+    void shutdown() {
+        for (auto& [k, e] : map_)
+            if (e.tex) glDeleteTextures(1, &e.tex);
+        map_.clear();
+    }
+};
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -545,6 +598,9 @@ int main(int argc, char** argv) {
     if (!window) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);  // vsync
+#ifdef DEARTT_FACE_RECOGNITION
+    glfwSetDropCallback(window, dropCb);  // profile-picture drag & drop
+#endif
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -574,6 +630,14 @@ int main(int argc, char** argv) {
     IconCache giftIcons;
     IconCache avatars;
 
+#ifdef DEARTT_FACE_RECOGNITION
+    FaceTracker faceTracker;
+    {
+        std::string mdir = findResource("models");
+        if (!mdir.empty()) faceTracker.start(mdir);
+    }
+#endif
+
     session.setEventSink(
         [&eventServer, &stats, &avatars](const ttlive::Event& e) {
             stats.record(e);
@@ -588,6 +652,38 @@ int main(int argc, char** argv) {
     const char* glRenderer = (const char*)glGetString(GL_RENDERER);
     std::string renderer = glRenderer ? glRenderer : "?";
 
+    // --- profiles: a profile pairs a stream with the people expected on it.
+    std::vector<std::string> profileList = profiles::list();
+    int profileIdx = -1;
+    Profile curProfile;
+    bool profileLoaded = false;
+    bool showProfileMgr = false;
+    char newProfName[128] = "";
+    char newProfStream[128] = "";
+    char newPersonName[128] = "";
+    int assignTrackId = 0;          // face clicked for naming (for highlight)
+    char assignNewName[128] = "";
+    std::vector<float> assignEmb;   // embedding snapshotted at click time
+    float assignArea = 0.0f;
+#ifdef DEARTT_FACE_RECOGNITION
+    AvatarFetcher avatarFetcher;
+    AvatarTextures avatarTex;
+    std::string avatarPicTarget;    // person the picture popup is editing
+    std::string avatarDropTarget;   // person to receive a dropped image now
+    char avatarTT[128] = "";        // TikTok @username input
+    char avatarURL[256] = "";       // image URL input
+#endif
+
+    auto selectProfile = [&](int idx) {
+        profileIdx = idx;
+        profileLoaded = (idx >= 0 && idx < (int)profileList.size() &&
+                         profiles::load(profileList[idx], curProfile));
+#ifdef DEARTT_FACE_RECOGNITION
+        if (profileLoaded) faceTracker.selectProfile(curProfile.dir);
+#endif
+    };
+
+    // Optional dev shortcut: `deartt <username>` still connects directly.
     char userBuf[128] = "";
     if (argc > 1) {
         std::snprintf(userBuf, sizeof(userBuf), "%s",
@@ -702,11 +798,25 @@ int main(int argc, char** argv) {
         if (player.takeFrame(frameRgba, fw, fh, fsar)) {
             videoTex.upload(frameRgba, fw, fh);
             videoTex.sar = fsar;
+#ifdef DEARTT_FACE_RECOGNITION
+            if (faceTracker.running())
+                faceTracker.submitFrame(frameRgba.data(), fw, fh);
+#endif
         }
 
         stats.sample();      // 1 Hz time series point (throttled internally)
         giftIcons.upload();  // decoded icons -> GL textures
         avatars.upload();
+
+#ifdef DEARTT_FACE_RECOGNITION
+        // Apply finished profile-picture downloads.
+        for (const auto& r : avatarFetcher.poll())
+            if (r.ok) {
+                faceTracker.setAvatar(r.person, r.path);
+                avatarTex.invalidate(r.person);
+            }
+        avatarDropTarget.clear();  // set again this frame if the picker is open
+#endif
 
         // --- UI --------------------------------------------------------------
         ImGui_ImplOpenGL3_NewFrame();
@@ -721,23 +831,67 @@ int main(int argc, char** argv) {
                          ImGuiWindowFlags_NoBringToFrontOnFocus |
                          ImGuiWindowFlags_NoSavedSettings);
 
-        // Top bar: connect controls + status.
+        // Top bar: profile picker + connect controls + status.
         {
             bool busy = session.state() == LiveSession::State::Connecting ||
                         session.state() == LiveSession::State::Connected;
-            ImGui::SetNextItemWidth(220);
-            bool enter = ImGui::InputTextWithHint(
-                "##user", "@username", userBuf, sizeof(userBuf),
-                ImGuiInputTextFlags_EnterReturnsTrue);
+
+            // Profile combo.
+            ImGui::SetNextItemWidth(180);
+            const char* preview = profileLoaded ? curProfile.name.c_str()
+                                                 : "(select profile)";
+            if (ImGui::BeginCombo("##profile", preview)) {
+                for (int i = 0; i < (int)profileList.size(); i++) {
+                    bool sel = (i == profileIdx);
+                    if (ImGui::Selectable(profileList[i].c_str(), sel) && !busy)
+                        selectProfile(i);
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("New")) {
+                newProfName[0] = newProfStream[0] = '\0';
+                ImGui::OpenPopup("New profile");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Manage") && profileLoaded)
+                showProfileMgr = true;
+
+            // New-profile modal.
+            if (ImGui::BeginPopupModal("New profile", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::InputTextWithHint("name", "e.g. FridayShow",
+                                         newProfName, sizeof(newProfName));
+                ImGui::InputTextWithHint("stream", "@username", newProfStream,
+                                         sizeof(newProfStream));
+                if (ImGui::Button("Create") && newProfName[0]) {
+                    if (profiles::create(newProfName, newProfStream)) {
+                        profileList = profiles::list();
+                        for (int i = 0; i < (int)profileList.size(); i++)
+                            if (profileList[i] == std::string(newProfName)) {
+                                selectProfile(i);
+                                break;
+                            }
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+
             ImGui::SameLine();
             if (!busy) {
-                if ((ImGui::Button("Connect") || enter) && userBuf[0]) {
-                    const char* u = userBuf[0] == '@' ? userBuf + 1 : userBuf;
+                bool canConnect = profileLoaded && !curProfile.stream.empty();
+                if (!canConnect) ImGui::BeginDisabled();
+                if (ImGui::Button("Connect") && canConnect) {
                     chat.clear();
                     videoTex.destroy();
                     playerStarted = false;
-                    session.start(u);
+                    session.start(curProfile.stream);
                 }
+                if (!canConnect) ImGui::EndDisabled();
             } else {
                 if (ImGui::Button("Disconnect")) {
                     session.stop();
@@ -842,6 +996,21 @@ int main(int argc, char** argv) {
         }
         ImGui::SameLine();
         ImGui::Checkbox("stats", &showStats);
+#ifdef DEARTT_FACE_RECOGNITION
+        if (faceTracker.running()) {
+            // Identity smoothing window (temporal vote + coast duration).
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120);
+            float win = faceTracker.identityWindow();
+            if (ImGui::SliderFloat("##idwin", &win, 1.0f, 10.0f, "id %.0fs"))
+                faceTracker.setIdentityWindow(win);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Identity window: names are the majority vote over the\n"
+                    "last N seconds, and a face that briefly turns away is\n"
+                    "kept for this long. Longer = steadier, slower to switch.");
+        }
+#endif
         ImGui::Separator();
 
         // Split: video (left, stretch) | gifts | stats | chat (fixed panes;
@@ -881,6 +1050,145 @@ int main(int argc, char** argv) {
                              ImVec2(off.x + sz.x, off.y + sz.y));
                 vidPos = off;
                 vidSize = sz;
+
+#ifdef DEARTT_FACE_RECOGNITION
+                // Face bounding boxes + identity labels; click a face to name.
+                if (faceTracker.running()) {
+                    // Map from frame pixels to display pixels.
+                    float fx = sz.x / (videoTex.w * videoTex.sar);
+                    float fy = sz.y / (float)videoTex.h;
+                    ImVec2 mouse = ImGui::GetMousePos();
+                    bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                                   ImGui::IsWindowHovered();
+                    auto trackedFaces = faceTracker.faces();
+                    // name -> display-picture path, for the label thumbnails.
+                    std::map<std::string, std::string> avByName;
+                    std::map<std::string, int> idxByName;  // roster position
+                    {
+                        int i = 0;
+                        for (const auto& p : faceTracker.roster()) {
+                            if (!p.avatar.empty()) avByName[p.name] = p.avatar;
+                            idxByName[p.name] = ++i;  // 1..N, stable per person
+                        }
+                    }
+                    for (const auto& tf : trackedFaces) {
+                        ImVec2 bmin(off.x + tf.box.x * fx,
+                                    off.y + tf.box.y * fy);
+                        ImVec2 bmax(bmin.x + tf.box.w * fx,
+                                    bmin.y + tf.box.h * fy);
+                        // Green = named, blue = unknown; dimmed while coasting.
+                        int a = tf.coasting ? 110 : 220;
+                        ImU32 col = tf.name.empty()
+                                        ? IM_COL32(100, 200, 255, a)
+                                        : IM_COL32(80, 255, 120, a);
+                        dl->AddRect(bmin, bmax, col, 4.0f, 0, 2.0f);
+
+                        // Click inside the box -> snapshot THIS face's
+                        // embedding now, then open the naming popup. The
+                        // assignment later uses this fixed snapshot, so it
+                        // can't drift to another face while the popup is open.
+                        if (clicked && mouse.x >= bmin.x && mouse.x <= bmax.x &&
+                            mouse.y >= bmin.y && mouse.y <= bmax.y &&
+                            !tf.embedding.empty()) {
+                            assignTrackId = tf.trackId;
+                            assignEmb = tf.embedding;
+                            assignArea = tf.box.w * tf.box.h;
+                            assignNewName[0] = '\0';
+                            ImGui::OpenPopup("AssignFace");
+                        }
+
+                        // Highlight the face currently being named.
+                        if (tf.trackId == assignTrackId &&
+                            ImGui::IsPopupOpen("AssignFace"))
+                            dl->AddRect(ImVec2(bmin.x - 2, bmin.y - 2),
+                                        ImVec2(bmax.x + 2, bmax.y + 2),
+                                        IM_COL32(255, 230, 90, 255), 5.0f, 0,
+                                        3.0f);
+
+                        // Badge anchored to the roster, not the track: a known
+                        // person shows their fixed number (1..N, never more
+                        // than the people in the profile); an unknown face
+                        // shows "?" (click it to name). No runaway counter.
+                        char idxBuf[8];
+                        auto ii = idxByName.find(tf.name);
+                        if (!tf.name.empty() && ii != idxByName.end())
+                            std::snprintf(idxBuf, sizeof(idxBuf), "#%d",
+                                          ii->second);
+                        else
+                            std::snprintf(idxBuf, sizeof(idxBuf), "?");
+                        ImVec2 is = ImGui::CalcTextSize(idxBuf);
+                        dl->AddRectFilled(
+                            bmin,
+                            ImVec2(bmin.x + is.x + 6, bmin.y + is.y + 4),
+                            IM_COL32(0, 0, 0, 200), 3.0f);
+                        dl->AddText(ImVec2(bmin.x + 3, bmin.y + 2),
+                                    IM_COL32(255, 255, 255, 255), idxBuf);
+
+                        // Identity label above the box: name + match quality
+                        // (cosine similarity, not vote agreement — a weak
+                        // match now reads low instead of a misleading 100%).
+                        if (!tf.name.empty()) {
+                            char label[128];
+                            std::snprintf(label, sizeof(label), "%s (%.0f%%)",
+                                          tf.name.c_str(),
+                                          tf.similarity * 100.0f);
+                            ImVec2 ts = ImGui::CalcTextSize(label);
+                            // Optional display-picture thumbnail before the name.
+                            unsigned av = 0;
+                            auto ai = avByName.find(tf.name);
+                            if (ai != avByName.end())
+                                av = avatarTex.get(tf.name, ai->second);
+                            float avSz = av ? ts.y + 4 : 0.0f;
+                            ImVec2 lp(bmin.x, bmin.y - ts.y - 4);
+                            dl->AddRectFilled(
+                                ImVec2(lp.x - 2, lp.y - 1),
+                                ImVec2(lp.x + avSz + ts.x + 4, lp.y + ts.y + 2),
+                                IM_COL32(0, 0, 0, 180), 3.0f);
+                            if (av) {
+                                dl->AddImageRounded(
+                                    (ImTextureID)(intptr_t)av,
+                                    ImVec2(lp.x, lp.y),
+                                    ImVec2(lp.x + avSz - 2, lp.y + avSz - 2),
+                                    ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE,
+                                    (avSz - 2) * 0.5f);
+                            }
+                            dl->AddText(ImVec2(lp.x + avSz, lp.y), col, label);
+                        }
+                    }
+
+                    // Naming popup: assigns the embedding snapshotted at
+                    // click (assignEmb), so the target face is locked in.
+                    if (ImGui::BeginPopup("AssignFace")) {
+                        ImGui::TextDisabled("Assign this face to:");
+                        ImGui::Separator();
+                        auto roster = faceTracker.roster();
+                        for (const auto& p : roster) {
+                            std::string lbl = p.name + (p.hasFace ? "  *" : "");
+                            if (ImGui::Selectable(lbl.c_str())) {
+                                faceTracker.assignEmbedding(p.name, assignEmb,
+                                                            assignArea);
+                                ImGui::CloseCurrentPopup();
+                            }
+                        }
+                        if (roster.empty())
+                            ImGui::TextDisabled("no people yet");
+                        ImGui::Separator();
+                        ImGui::SetNextItemWidth(160);
+                        bool go = ImGui::InputTextWithHint(
+                            "##newassign", "new name", assignNewName,
+                            sizeof(assignNewName),
+                            ImGuiInputTextFlags_EnterReturnsTrue);
+                        ImGui::SameLine();
+                        if ((ImGui::Button("Add") || go) && assignNewName[0]) {
+                            faceTracker.addPerson(assignNewName);
+                            faceTracker.assignEmbedding(assignNewName, assignEmb,
+                                                        assignArea);
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
+                    }
+                }
+#endif
 
                 // Stats overlay: decode fps vs UI fps + GL renderer.
                 char sarTxt[32] = "";
@@ -986,6 +1294,146 @@ int main(int argc, char** argv) {
 
         ImGui::End();
 
+        // --- profile manager: stream + roster (add / delete / reset) --------
+        if (showProfileMgr && profileLoaded) {
+            ImGui::SetNextWindowSize(ImVec2(380, 440), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Manage profile", &showProfileMgr)) {
+                ImGui::Text("Profile: %s", curProfile.name.c_str());
+
+                // Editable stream.
+                static char streamBuf[128];
+                std::snprintf(streamBuf, sizeof(streamBuf), "%s",
+                              curProfile.stream.c_str());
+                ImGui::SetNextItemWidth(200);
+                if (ImGui::InputTextWithHint(
+                        "##stream", "@username", streamBuf, sizeof(streamBuf),
+                        ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    profiles::setStream(curProfile.name, streamBuf);
+                    profiles::load(curProfile.name, curProfile);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(stream)");
+                ImGui::Separator();
+
+                // Add a person to the roster.
+                ImGui::SetNextItemWidth(200);
+                bool addP = ImGui::InputTextWithHint(
+                    "##person", "new person name", newPersonName,
+                    sizeof(newPersonName), ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::SameLine();
+                if ((ImGui::Button("Add") || addP) && newPersonName[0]) {
+#ifdef DEARTT_FACE_RECOGNITION
+                    faceTracker.addPerson(newPersonName);
+#endif
+                    newPersonName[0] = '\0';
+                }
+                ImGui::TextDisabled(
+                    "Click a face in the video to name it. * = face captured.");
+
+                // Roster list with per-person Reset / Delete.
+                ImGui::BeginChild("people", ImVec2(0, 0), true);
+#ifdef DEARTT_FACE_RECOGNITION
+                auto roster = faceTracker.roster();
+                bool openAvatarPopup = false;  // deferred: OpenPopup must run
+                                               // outside the per-person PushID
+                for (const auto& p : roster) {
+                    ImGui::PushID(p.name.c_str());
+                    // Display picture thumbnail (or placeholder).
+                    unsigned tex = avatarTex.get(p.name, p.avatar);
+                    ImVec2 cur = ImGui::GetCursorScreenPos();
+                    if (tex)
+                        ImGui::Image((ImTextureID)(intptr_t)tex,
+                                     ImVec2(34, 34));
+                    else {
+                        ImGui::GetWindowDrawList()->AddCircleFilled(
+                            ImVec2(cur.x + 17, cur.y + 17), 17,
+                            IM_COL32(70, 70, 82, 255));
+                        ImGui::Dummy(ImVec2(34, 34));
+                    }
+                    ImGui::SameLine();
+                    ImGui::BeginGroup();
+                    ImGui::TextColored(p.hasFace
+                                           ? ImVec4(0.5f, 1.0f, 0.6f, 1.0f)
+                                           : ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                                       "%s%s", p.name.c_str(),
+                                       p.hasFace ? "  * face" : "");
+                    if (ImGui::SmallButton("Picture")) {
+                        avatarPicTarget = p.name;
+                        avatarTT[0] = avatarURL[0] = '\0';
+                        openAvatarPopup = true;  // opened after PopID below
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Reset landmark"))
+                        faceTracker.resetPerson(p.name);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Delete"))
+                        faceTracker.removePerson(p.name);
+                    ImGui::EndGroup();
+                    ImGui::PopID();
+                    ImGui::Separator();
+                }
+                if (roster.empty())
+                    ImGui::TextDisabled("no people yet — add one above");
+
+                // Open here (same ID scope as BeginPopup, i.e. no PushID).
+                if (openAvatarPopup) ImGui::OpenPopup("AvatarSrc");
+
+                // Shared "set picture" popup (3 sources; all save locally).
+                if (ImGui::BeginPopup("AvatarSrc")) {
+                    ImGui::Text("Picture for %s", avatarPicTarget.c_str());
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Drag an image onto the window,");
+                    ImGui::TextDisabled("or use one of these:");
+                    ImGui::SetNextItemWidth(180);
+                    bool ttGo = ImGui::InputTextWithHint(
+                        "##tt", "@tiktok username", avatarTT, sizeof(avatarTT),
+                        ImGuiInputTextFlags_EnterReturnsTrue);
+                    ImGui::SameLine();
+                    if ((ImGui::Button("Fetch##tt") || ttGo) && avatarTT[0]) {
+                        avatarFetcher.request(curProfile.dir, avatarPicTarget,
+                                              AvatarFetcher::Source::TikTok,
+                                              avatarTT);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SetNextItemWidth(180);
+                    bool urlGo = ImGui::InputTextWithHint(
+                        "##url", "https://image.url", avatarURL,
+                        sizeof(avatarURL),
+                        ImGuiInputTextFlags_EnterReturnsTrue);
+                    ImGui::SameLine();
+                    if ((ImGui::Button("Fetch##url") || urlGo) && avatarURL[0]) {
+                        avatarFetcher.request(curProfile.dir, avatarPicTarget,
+                                              AvatarFetcher::Source::Url,
+                                              avatarURL);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    // While this popup is open, dropped images go to this
+                    // person (drained after the frame).
+                    avatarDropTarget = avatarPicTarget;
+                    ImGui::EndPopup();
+                }
+
+                if (!avatarFetcher.status().empty())
+                    ImGui::TextDisabled("%s", avatarFetcher.status().c_str());
+#else
+                ImGui::TextDisabled("face recognition not built in");
+#endif
+                ImGui::EndChild();
+            }
+            ImGui::End();
+        }
+#ifdef DEARTT_FACE_RECOGNITION
+        // Route dropped image files to the person whose picture popup is open.
+        if (!g_droppedFiles.empty()) {
+            if (!avatarDropTarget.empty() && profileLoaded) {
+                for (const auto& f : g_droppedFiles)
+                    avatarFetcher.request(curProfile.dir, avatarDropTarget,
+                                          AvatarFetcher::Source::File, f);
+            }
+            g_droppedFiles.clear();
+        }
+#endif
+
         // --- render ---------------------------------------------------------
         ImGui::Render();
         int dw, dh;
@@ -997,6 +1445,10 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(window);
     }
 
+#ifdef DEARTT_FACE_RECOGNITION
+    faceTracker.stop();
+    avatarTex.shutdown();
+#endif
     session.stop();
     player.close();
     videoTex.destroy();

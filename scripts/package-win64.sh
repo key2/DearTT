@@ -46,6 +46,23 @@ cp web/* "$DIST/web/"
 mkdir -p "$DIST/fonts"
 cp fonts/Twemoji.Mozilla.ttf "$DIST/fonts/"
 
+# ONNX Runtime + face recognition models (if the cross-build included them).
+if [ -f "$DEPS/onnxruntime/lib/onnxruntime.dll" ]; then
+  cp "$DEPS/onnxruntime/lib/onnxruntime.dll" "$DIST/"
+  # onnxruntime.dll is MSVC-built; ship the VC++ runtime it depends on.
+  VCRT="$DEPS/dl/vcrt"
+  for dll in vcruntime140.dll vcruntime140_1.dll msvcp140.dll msvcp140_1.dll; do
+    [ -f "$VCRT/$dll" ] && cp "$VCRT/$dll" "$DIST/"
+  done
+  mkdir -p "$DIST/models"
+  for m in models/*.onnx; do
+    [ -f "$m" ] && cp "$m" "$DIST/models/"
+  done
+  # Profiles are created by the user at runtime (each pairs a stream with the
+  # people expected on it + their reference photos); ship an empty folder.
+  mkdir -p "$DIST/profiles"
+fi
+
 # Bundled pan-Unicode base font (GoNotoKurrent, SIL OFL 1.1;
 # github.com/satbyy/go-noto-universal): 80+ merged Noto scripts so chat in
 # Arabic/Cyrillic/Thai/Indic/CJK/... renders identically on every machine.
