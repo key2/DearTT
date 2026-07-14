@@ -23,3 +23,6 @@ profiles/
 # with third_party/voxtral/tools/download_model.sh into models/voxtral/.
 models/voxtral/
 *.gguf
+
+# Local build/ops notes (not for the public repo).
+WINDOWS-NATIVE-BUILD-OVER-SSH.md
