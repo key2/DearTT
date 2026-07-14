@@ -26,6 +26,24 @@ and an embedded web server that streams every event as JSON.
 - **Fonts**: bundled pan-Unicode
   [GoNotoKurrent](https://github.com/satbyy/go-noto-universal) (SIL OFL) +
   Twemoji color emoji — chat renders in any script out of the box.
+- **Face recognition** (optional): ONNX Runtime + InsightFace (SCRFD detect,
+  ArcFace embed) — name the people in the video; identities are smoothed over
+  a configurable time window and shown as overlays.
+- **Speech-to-text** (optional): live transcription of the stream audio with
+  [voxtral.cpp](third_party/voxtral) (Voxtral-Mini-4B-Realtime, GGUF) on CPU
+  or GPU (`-DGGML_VULKAN=ON`). The ~2.7 GB model is **not** shipped: the app
+  downloads it on first run (in-app progress bar, resumable) into
+  `models/voxtral/` next to the executable.
+
+## Prebuilt releases
+
+The [Releases page](https://github.com/key2/DearTT/releases) has ready-to-run
+packages:
+
+- **Windows x64** (`dist-win64.zip`) — native MSYS2/UCRT64 build with face
+  recognition and STT (Vulkan GPU + CPU) built in. Unzip and run `deartt.exe`.
+- **Linux x64** (`dist-linux64.zip`) — links distro libraries at runtime (see
+  the Linux build section for the required packages).
 
 ## Getting the source
 
@@ -56,6 +74,17 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/deartt [@username]
 ```
+
+Optional features (both auto-detected / opt-in):
+
+- **Face recognition**: install `libonnxruntime-dev` (or pass
+  `-DONNXRUNTIME_DIR=<prebuilt onnxruntime root>`); the configure log prints
+  `Face recognition: ON`.
+- **Speech-to-text**: on by default (`-DDEARTT_STT=ON`); ggml is fetched at
+  configure time. Add `-DGGML_VULKAN=ON` for GPU transcription (needs
+  Vulkan headers + `glslc` from shaderc at build time). For redistributable
+  binaries also pass `-DGGML_NATIVE=OFF` — the default compiles the CPU
+  backend with `-march=native`.
 
 Package a release zip (stripped binary + js/web/fonts assets + build-info):
 
@@ -139,6 +168,12 @@ run `deartt.exe`. If a "DLL not found" error ever appears, compare
 `build-info.txt` in the extracted folder with the one in the zip — it means
 an old extracted copy is being launched.
 
+> **Note**: the cross-compiled build has speech-to-text disabled (no ggml
+> toolchain in the MinGW cross setup). The published Windows release is built
+> *natively* on Windows with MSYS2/UCRT64 instead, which enables STT
+> (`-DDEARTT_STT=ON -DGGML_VULKAN=ON`) and face recognition; the CMake
+> options are the same, minus the toolchain file.
+
 ## Running
 
 ```sh
@@ -151,6 +186,9 @@ an old extracted copy is being launched.
 | `DEARTT_PORT` | Webview/WebSocket port (default 8080) |
 | `DEARTT_COOKIES` | Cookies for the TikTok session, e.g. `sessionid=...` — needed for age/region-restricted rooms |
 | `GLFW_PLATFORM` | `x11` or `wayland` to force the Linux backend |
+| `DEARTT_VOXTRAL_MODEL` | Path to a Voxtral `.gguf` (overrides the `models/voxtral/` scan) |
+| `DEARTT_VOXTRAL_URL` | Alternate URL for the first-run model download |
+| `DEARTT_NO_MODEL_DOWNLOAD` | Set to disable the automatic first-run model download |
 
 The webview at `http://localhost:8080/` shows every event live; the
 `/ws` WebSocket delivers them as JSON (type, user, gift fields incl.
@@ -169,10 +207,15 @@ src/
   event_server.cpp    civetweb HTTP + WebSocket server (:8080)
   event_json.cpp      Event -> JSON (incl. reflective protobuf decode)
   icon_cache.cpp      Gift icon / avatar fetch + decode + GL textures
+  face_*.cpp          Face detect (SCRFD) / embed (ArcFace) / gallery / track
+  stt.cpp             Live speech-to-text worker (voxtral.cpp)
+  model_download.cpp  First-run Voxtral model download (streaming, resumable)
 web/index.html        The event-viewer website
 fonts/                GoNotoKurrent (OFL) + Twemoji (CC-BY)
+models/               Face detection/recognition ONNX models (committed);
+                      models/voxtral/ is filled by the first-run download
 imgui/, third_party/  Vendored: imgui, implot, glfw, freetype, civetweb,
-                      miniaudio, nlohmann-json
+                      miniaudio, nlohmann-json, voxtral.cpp
 ttlive-cpp/           TikTok LIVE client library (submodule)
 cmake/                MinGW-w64 toolchain file
 scripts/              Windows dep builder + Linux/Windows/macOS packagers
