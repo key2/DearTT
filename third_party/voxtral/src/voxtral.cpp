@@ -881,8 +881,16 @@ voxtral_model * voxtral_model_load_from_file(
             const size_t nbytes = ggml_nbytes(t);
 
             std::vector<uint8_t> tmp(nbytes);
-            fseek(fp, (long)offset, SEEK_SET);
-            if (fread(tmp.data(), 1, nbytes, fp) != nbytes) {
+            // 64-bit seek: plain fseek takes a 'long', which is 32-bit on
+            // Windows (LLP64) and truncates offsets past 2 GB — model files
+            // are larger than that.
+#if defined(_WIN32)
+            const int seek_rc = _fseeki64(fp, (long long)offset, SEEK_SET);
+#else
+            const int seek_rc = fseeko(fp, (off_t)offset, SEEK_SET);
+#endif
+            if (seek_rc != 0 ||
+                fread(tmp.data(), 1, nbytes, fp) != nbytes) {
                 fprintf(stderr, "voxtral: failed to read tensor '%s'\n", name);
                 fclose(fp);
                 voxtral_model_free(model);
