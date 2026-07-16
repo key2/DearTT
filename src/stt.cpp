@@ -1,6 +1,11 @@
 #include "stt.hpp"
 
+#include "ml_init.hpp"
+
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -16,15 +21,20 @@ extern "C" {
 
 namespace {
 
-// Wine's winevulkan doesn't implement every extension ggml's Vulkan backend
-// asks for, and ggml aborts (not throws) on some of those paths — uncatchable.
-// Detect Wine and keep STT on the CPU there.
-bool runningUnderWine() {
+// Wine's Vulkan support varies by version: Wine <= 9 fails at ggml's device
+// creation (throws, sometimes aborts), while Wine >= 10 runs the ggml Vulkan
+// backend fine (verified: model load + realtime decode on winevulkan 10/11).
+// Returns the Wine version string ("9.0", "11.0", ...) or nullptr on real
+// Windows.
+const char* wineVersion() {
 #ifdef _WIN32
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-    return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+    if (!ntdll) return nullptr;
+    typedef const char* (__cdecl * wine_get_version_t)(void);
+    auto get = (wine_get_version_t)GetProcAddress(ntdll, "wine_get_version");
+    return get ? get() : nullptr;
 #else
-    return false;
+    return nullptr;
 #endif
 }
 
@@ -65,6 +75,10 @@ void SttEngine::setEnabled(bool e) {
 std::string SttEngine::status() const {
     std::lock_guard<std::mutex> lk(textMutex_);
     return status_;
+}
+std::string SttEngine::backend() const {
+    std::lock_guard<std::mutex> lk(textMutex_);
+    return backend_;
 }
 std::string SttEngine::transcript() const {
     std::lock_guard<std::mutex> lk(textMutex_);
@@ -125,45 +139,87 @@ void SttEngine::workerMain(std::string modelPath) {
     voxtral_context* ctx = nullptr;
     std::vector<voxtral_gpu_backend> attempts = {voxtral_gpu_backend::auto_detect,
                                                  voxtral_gpu_backend::none};
-    if (runningUnderWine()) {
-        std::fprintf(stderr, "[stt] Wine detected: CPU backend only\n");
-        attempts = {voxtral_gpu_backend::none};
-    }
-    for (voxtral_gpu_backend gpu : attempts) {
-        try {
-            model = voxtral_model_load_from_file(modelPath, nullptr, gpu);
-            if (!model) break;  // file problem: a retry won't help
-            voxtral_context_params params;
-            params.gpu = gpu;
-            ctx = voxtral_init_from_model(model, params);
-        } catch (const std::exception& e) {
+    if (const char* wv = wineVersion()) {
+        // Wine <= 9's winevulkan can't run ggml's compute path (throws or
+        // aborts at device creation) — default those to CPU. Wine >= 10
+        // handles it, so keep the normal GPU auto-detection there.
+        // DEARTT_STT_GPU overrides either way.
+        if (std::atoi(wv) < 10) {
             std::fprintf(stderr,
-                         "[stt] backend init failed (%s)%s\n", e.what(),
-                         gpu == voxtral_gpu_backend::auto_detect
-                             ? ", retrying CPU-only"
-                             : "");
-            ctx = nullptr;
+                         "[stt] Wine %s detected: CPU backend by default\n", wv);
+            attempts = {voxtral_gpu_backend::none};
+        } else {
+            std::fprintf(stderr, "[stt] Wine %s detected: GPU enabled\n", wv);
         }
-        if (ctx) break;
-        if (model) {
-            voxtral_model_free(model);
-            model = nullptr;
+    }
+    // DEARTT_STT_GPU=none forces CPU (useful when the only GPU is a weak
+    // iGPU where uploading 2.7 GB of weights takes minutes); =auto forces a
+    // GPU attempt even under Wine (CPU fallback still applies on failure).
+    if (const char* g = std::getenv("DEARTT_STT_GPU")) {
+        if (std::strcmp(g, "none") == 0 || std::strcmp(g, "cpu") == 0) {
+            std::fprintf(stderr, "[stt] DEARTT_STT_GPU=%s: CPU backend only\n", g);
+            attempts = {voxtral_gpu_backend::none};
+        } else if (std::strcmp(g, "auto") == 0 || std::strcmp(g, "gpu") == 0 ||
+                   std::strcmp(g, "vulkan") == 0) {
+            std::fprintf(stderr, "[stt] DEARTT_STT_GPU=%s: trying GPU\n", g);
+            attempts = {voxtral_gpu_backend::auto_detect,
+                        voxtral_gpu_backend::none};
+        }
+    }
+    {
+        // Serialize runtime init with the face tracker (see ml_init.hpp).
+        std::lock_guard<std::mutex> initLk(mlInitMutex());
+        for (voxtral_gpu_backend gpu : attempts) {
+            std::fprintf(stderr, "[stt] loading %s (%s)...\n",
+                         modelPath.c_str(),
+                         gpu == voxtral_gpu_backend::none ? "CPU" : "auto/GPU");
+            try {
+                model = voxtral_model_load_from_file(modelPath, nullptr, gpu);
+                if (!model) break;  // file problem: a retry won't help
+                voxtral_context_params params;
+                params.gpu = gpu;
+                ctx = voxtral_init_from_model(model, params);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr,
+                             "[stt] backend init failed (%s)%s\n", e.what(),
+                             gpu == voxtral_gpu_backend::auto_detect
+                                 ? ", retrying CPU-only"
+                                 : "");
+                ctx = nullptr;
+            }
+            if (ctx) break;
+            if (model) {
+                voxtral_model_free(model);
+                model = nullptr;
+            }
         }
     }
     if (!model) {
+        std::fprintf(stderr, "[stt] failed to load model: %s\n",
+                     modelPath.c_str());
         std::lock_guard<std::mutex> lk(textMutex_);
         status_ = "failed to load model: " + modelPath;
         return;
     }
     if (!ctx) {
+        std::fprintf(stderr, "[stt] failed to init context\n");
         voxtral_model_free(model);
         std::lock_guard<std::mutex> lk(textMutex_);
         status_ = "failed to init context";
         return;
     }
+    const voxtral_gpu_backend used = voxtral_get_gpu_backend(*ctx);
+    const char* backendName =
+        used == voxtral_gpu_backend::vulkan ? "Vulkan"
+        : used == voxtral_gpu_backend::cuda ? "CUDA"
+        : used == voxtral_gpu_backend::metal ? "Metal"
+                                             : "CPU";
+    std::fprintf(stderr, "[stt] model loaded, ready (backend: %s)\n",
+                 backendName);
     {
         std::lock_guard<std::mutex> lk(textMutex_);
         status_ = "ready";
+        backend_ = backendName;
     }
     ready_.store(true);
 

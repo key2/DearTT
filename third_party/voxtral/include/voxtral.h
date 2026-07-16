@@ -143,6 +143,10 @@ voxtral_context * voxtral_init_from_model(
     voxtral_model              * model,
     const voxtral_context_params & params);
 
+// Which GPU backend the context actually ended up using after auto-detection
+// and CPU fallback (none = CPU).
+voxtral_gpu_backend voxtral_get_gpu_backend(const voxtral_context & ctx);
+
 void voxtral_free(voxtral_context * ctx);
 
 bool voxtral_transcribe_file(

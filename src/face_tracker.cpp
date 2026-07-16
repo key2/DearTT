@@ -1,10 +1,12 @@
 #include "face_tracker.hpp"
 #include "face_embedder.hpp"
 #include "face_gallery.hpp"
+#include "ml_init.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 
@@ -128,23 +130,40 @@ void FaceTracker::threadMain(std::string modelsDir) {
     FaceEmbedder embedder;
     FaceGallery gallery;
 
+    // Serialize ONNX Runtime init with the STT engine (see ml_init.hpp):
+    // both bootstrap Vulkan on first touch, and doing that concurrently
+    // trips a winevulkan race under Wine.
+    std::unique_lock<std::mutex> initLk(mlInitMutex());
     try {
         if (!detector.load(modelsDir + "/det_500m.onnx")) {
+            std::fprintf(stderr, "[face] failed to load %s/det_500m.onnx\n",
+                         modelsDir.c_str());
             std::lock_guard<std::mutex> lk(resultMutex_);
             status_ = "failed to load detection model";
             return;
         }
         if (!embedder.load(modelsDir + "/w600k_mbf.onnx")) {
+            std::fprintf(stderr, "[face] failed to load %s/w600k_mbf.onnx\n",
+                         modelsDir.c_str());
             std::lock_guard<std::mutex> lk(resultMutex_);
             status_ = "failed to load recognition model";
             return;
         }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[face] ONNX Runtime init failed: %s\n", e.what());
+        std::lock_guard<std::mutex> lk(resultMutex_);
+        status_ = "ONNX Runtime unavailable (CPU may lack AVX2 or Windows too old)";
+        return;
     } catch (...) {
+        std::fprintf(stderr, "[face] ONNX Runtime init failed (unknown)\n");
         std::lock_guard<std::mutex> lk(resultMutex_);
         status_ = "ONNX Runtime unavailable (CPU may lack AVX2 or Windows too old)";
         return;
     }
 
+    initLk.unlock();  // init done — let the STT engine start its own
+
+    std::fprintf(stderr, "[face] models loaded, tracker ready\n");
     {
         std::lock_guard<std::mutex> lk(resultMutex_);
         status_ = "ready (no profile)";

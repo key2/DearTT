@@ -45,6 +45,10 @@ public:
     std::string transcript() const;
     void clearTranscript();
 
+    /// Compute backend actually in use once ready(): "Vulkan", "CUDA",
+    /// "Metal" or "CPU". Empty while not ready.
+    std::string backend() const;
+
     /// Decode-thread audio tap: resampled to 16 kHz mono and buffered (only
     /// while enabled + ready). Cheap; safe to call every audio frame.
     void pushAudio(const float* interleaved, int frames, int channels,
@@ -71,4 +75,5 @@ private:
     std::string transcript_;   // committed (finished windows)
     std::string partial_;      // current window, streaming in live
     std::string status_ = "idle";
+    std::string backend_;      // "" until the model is loaded
 };

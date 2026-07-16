@@ -1205,6 +1205,10 @@ voxtral_context * voxtral_init_from_model(
     return ctx;
 }
 
+voxtral_gpu_backend voxtral_get_gpu_backend(const voxtral_context & ctx) {
+    return ctx.gpu_type;
+}
+
 void voxtral_free(voxtral_context * ctx) {
     if (!ctx) return;
     if (ctx->sched_encoder)  ggml_backend_sched_free(ctx->sched_encoder);

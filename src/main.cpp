@@ -62,6 +62,8 @@
 #endif
 
 #ifdef DEARTT_STT
+#include <ggml-backend.h>
+
 #include "model_download.hpp"
 #include "stt.hpp"
 #endif
@@ -572,6 +574,17 @@ int main(int argc, char** argv) {
     // emits so its "invalid UTF-8" warnings never reach stderr.
     absl::SetMinLogLevel(absl::LogSeverityAtLeast::kInfinity);
     absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfinity);
+#endif
+
+#ifdef DEARTT_STT
+    // Bootstrap ggml's backend registry (including its Vulkan instance and
+    // device enumeration) BEFORE any OpenGL context exists. Under Wine, the
+    // host Vulkan loader fails to initialize once a GLX context is live
+    // (winevulkan asserts in loader.c and the worker threads die, leaving
+    // STT stuck at "loading model" and the face tracker silent). Doing the
+    // first touch here, on the main thread, is fast and harmless on real
+    // Windows/Linux.
+    ggml_backend_dev_count();
 #endif
 
     glfwSetErrorCallback(glfwErrorCb);
@@ -1281,16 +1294,23 @@ int main(int argc, char** argv) {
                 }
 #endif
 
-                // Stats overlay: decode fps vs UI fps + GL renderer.
+                // Stats overlay: decode fps vs UI fps + GL renderer + STT
+                // compute backend.
                 char sarTxt[32] = "";
                 if (videoTex.sar < 0.999f || videoTex.sar > 1.001f)
                     std::snprintf(sarTxt, sizeof(sarTxt), " (sar %.3f)",
                                   videoTex.sar);
+                char sttTxt[48] = "";
+#ifdef DEARTT_STT
+                if (stt.ready())
+                    std::snprintf(sttTxt, sizeof(sttTxt), " | stt %s",
+                                  stt.backend().c_str());
+#endif
                 char stats[256];
                 std::snprintf(stats, sizeof(stats),
-                              "%dx%d%s @ %.1f fps | ui %.0f fps | %s",
+                              "%dx%d%s @ %.1f fps | ui %.0f fps | %s%s",
                               videoTex.w, videoTex.h, sarTxt, player.fps(),
-                              io.Framerate, renderer.c_str());
+                              io.Framerate, renderer.c_str(), sttTxt);
                 ImVec2 tp(p0.x + 6, p0.y + 4);
                 dl->AddRectFilled(
                     ImVec2(tp.x - 3, tp.y - 2),
